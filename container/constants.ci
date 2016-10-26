@@ -5,7 +5,7 @@ TMPFS="/mytmpfs/lernstick"
 # these variables must be exported to make them available to
 # subcommands
 # Mirror used to build the image (preferably a local mirror) or from your cloud provider (in this case AWS)
-export MIRROR_BUILD="http://http://cloudfront.debian.net/debian"
+export MIRROR_BUILD="http://cloudfront.debian.net/debian"
 
 # Mirror used on the built system (preferably a mirror with good connectivity for most users)
 export MIRROR_SYSTEM="http://httpredir.debian.org/debian"
