@@ -23,7 +23,7 @@ done
 . ./functions.sh
 check_and_source_constants
 
-if [ "$USE_TMPFS" == "true" ]
+if [ "$USE_TMPFS" = "true" ]
 then
 	if [ -d "${TMPFS}" ]
 	then
