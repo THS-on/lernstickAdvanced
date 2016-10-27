@@ -1,13 +1,21 @@
 check_and_source_constants()
 {
-	if [ -e constants ]
+	if [ $CONSTANTS != "constants" ]
 	then
+		. $CONSTANTS
+		echo "Using custom constants"
+
+	else 
+	if [ -e constants ]
+	then 
 		. ./constants
 	else
-		echo "Please copy the file \"constants.example\" to \"constants\" and adopt the settings to your build environment."
+		echo "Please copy the file \"constants.example\" to \"constants\" and adopt the settings yto your build environment or specify a file with \"--constants <file>\" or \"-c <file>\"."
 		exit
 	fi
+	fi
 }
+
 
 init_build()
 {
