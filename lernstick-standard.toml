@@ -1,0 +1,7 @@
+[config]
+version-name = "standard"
+based-on = "base.toml"
+
+[excludes]
+package-lists = []
+hooks = ["uninstall_packages-mini.chroot"]

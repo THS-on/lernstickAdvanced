@@ -1,0 +1,18 @@
+# This map is shared between all other configs.
+# Single options can be overwritten in the build config
+[tmpfs]
+enabled = false
+build-path = "build" # TODO make this option always available
+path = "/mytmpfs"
+# TODO witch of these parameters is really necisserary
+image.path = "/mytmpfs/lernstick.img"
+image.size = "50G"
+image.mount = "/mytmpfs/lernstick"
+
+[apt-mirror]
+# Mirror used to build the image (preferably a local mirror)
+build = "http://deb.debian.org/debian"
+build-proxy = "http://localhost:3142"  # Specify proxy for build. Like "http://localhost:3142" for apt-cacher-ng
+# Mirror used on the built system (preferably a mirror with good connectivity for most users)
+system = "http://deb.debian.org/debian"
+system-security = "http://security.debian.org/"

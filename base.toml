@@ -1,0 +1,23 @@
+# This map serves as a base for all
+[config]
+based-on = "global.toml" # Include gobal config
+prefix = "lernstick10"
+
+# Default options for lb config.
+[lb-config]
+apt-indices = false
+apt-recommends = true
+architectures = "amd64"
+archive-areas = "main contrib non-free"
+binary-images = "iso"
+bootloaders = "syslinux grub-efi"
+chroot-squashfs-compression-level =  22
+chroot-squashfs-compression-type = "zstd"
+debootstrap-options = "\"--include=ca-certificates,openssl\""
+distribution =  "buster"
+firmware-chroot = false
+iso-volume = "auto"  # This will be automatically overwritten with "PREFIX-VERSION_NAME TODAY" if set to auto
+linux-packages = "linux-image-5.7.0-0.bpo.2"
+source = false
+verbose = true
+debug = true

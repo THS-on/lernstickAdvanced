@@ -1,0 +1,14 @@
+[config]
+version-name = "mini"
+based-on = "base.toml"
+
+[excludes]
+package-lists = [
+    "debian_contrib-default.list.chroot",
+    "debian_main-standard.list.chroot",
+    "lernstick-standard.list.chroot",
+    "libreoffice-core.list.chroot",
+    "itch.list.chroot",
+    "signal.list.chroot"
+    ]
+hooks = ["enable-flathub.container"]
