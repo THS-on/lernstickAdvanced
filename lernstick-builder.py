@@ -4,13 +4,12 @@ import toml
 import os
 import subprocess
 import shlex
-from time import sleep
+import sys
 import logging
 import datetime
 import hashlib
 from glob import glob
-
-# TODO add logger
+from time import sleep
 
 parser = argparse.ArgumentParser()
 parser.add_help = True
@@ -19,57 +18,32 @@ subparsers = parser.add_subparsers(help="actions", dest="command")
 build_parser = subparsers.add_parser("build")
 build_parser.add_argument("config")
 
-
-def merge(a, b):
-    """
-    Deep merges b into a.
-    If a and b have the same key and the value is not a dict the value of b is used.
-    :param a:
-    :param b:
-    :return: a
-    """
-    for key in b:
-        if key in a:
-            if isinstance(a[key], dict) and isinstance(b[key], dict):
-                merge(a[key], b[key])
-            elif a[key] != b[key]:  # If a and be differ overwrite with the value of b
-                a[key] = b[key]
-        else:
-            a[key] = b[key]
-    return a
+# TODO remove this
+logging.basicConfig(level=logging.DEBUG)
 
 
-def get_config(config_path, loaded=set()):
-    """
-    :param config_path: path to the config that should be get
-    :param loaded: config that already have been loaded
-    :return: parsed config
-    """
-    # TODO: Validate config
-    config = None
+def build(config_path):
+    today = datetime.date.today()
+    config = get_config(config_path)
+    start_time = datetime.datetime.now()
+    logging.info(f"Starting build at: {start_time}")
     try:
-        with open(config_path, 'r') as f:
-            config = toml.load(f)
+        build_clean()
+        build_handle_excludes(config)
+        build_bootloader_update(today)
+        build_lb_config(config, today)
+        # init_tmpfs()
+        build_lb_build()
+        check_b43legacy()
+        build_finish_build(config, today)
+    except BuildFailure as err:
+        logging.error("Something went wrong during building. Exiting...")
+        return False
 
-        # Recursively merge configs
-        if "based-on" in config.get("config", {}):
-            loaded.add(config_path)
-
-            lower_config_path = config["config"]["based-on"]
-            if lower_config_path in loaded:
-                logging.error("Circular includes are not allowed!")
-                raise EnvironmentError()
-            lower_config = get_config(lower_config_path, loaded)
-            if not lower_config:
-                raise EnvironmentError()
-            config = merge(lower_config, config)
-
-    except EnvironmentError:
-        logging.error(f"Could not successfully read config: {config_path}")
-        return None
-    else:
-        logging.debug(f"Config is {config}")
-        return config
+    end_time = datetime.datetime.now()
+    logging.info(f"Start: {start_time}")
+    logging.info(f"End: {end_time}")
+    return True
 
 
 def build_handle_excludes(config):
@@ -109,29 +83,6 @@ def build_handle_excludes(config):
             os.remove(file)
 
 
-def call_cmd(command, options=None, logging_level=logging.INFO):
-    command = [command]
-    if options:
-        command.extend(options)
-    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-
-    for line in iter(process.stdout.readline, b''):
-        # TODO: replace this with something more robust
-        logging.log(logging_level, line.decode().replace('\n', ''))
-
-    process.wait()
-    if process.returncode != 0:
-        logging.error(f"Command {command} exited with {process.returncode}")
-    return process.returncode == 0
-
-
-def call_lb(command, options=None):
-    new_options = [command]
-    if options:
-        new_options.extend(options)
-    return call_cmd("lb", new_options)
-
-
 def build_clean():
     paths = ["config/binary",
              "config/bootstrap",
@@ -147,10 +98,10 @@ def build_clean():
         elif os.path.isfile(path):
             logging.info(f"Removing file {path}")
             os.remove(path)
-    call_lb("clean")
+    if not call_lb("clean"):
+        raise BuildFailure("lb clean failed")
 
 
-# TODO fix this mess
 def build_bootloader_update(today):
     # ISOLINUX/SYSLINUX
     bootlogo = "config/bootloaders/isolinux/bootlogo"
@@ -175,32 +126,34 @@ def build_bootloader_update(today):
                      f'{grub_theme_dir}/theme.txt'])
 
 
-# Maps everything to a string
-def val_to_argument(val):
-    if val is True:
-        return "true"
-    if val is False:
-        return "false"
-    return str(val)
+# TODO test this function
+def cache_cleanup():
+    logging.info("removing deprecated packages from cache")
+    for dir in glob("cache/packages.*"):
+        logging.info(f"checking directory {dir}")
+        for deb_file in os.listdir(dir):
+            deb_path = os.path.join(dir, deb_file)
+            package_name = get_package_name(deb_path)
+            versions = glob(f"{dir}/{package_name}_*")
+            package_version = get_package_version(deb_path)
+            logging.debug(f'File: {deb_file}, Package name: {package_name}, Version {package_version} ')
 
+            if len(versions) == 1:  # Skip if we only have one version of a package
+                continue
 
-def add_if_true(key, map, list, value, before=None):
-    if map.get(key, False):
-        if before:
-            list.append(before)
-        list.append(value)
-
-
-def add_if_exists(key, map, list, before=None):
-    if key in map:
-        if before:
-            list.append(before)
-        list.append(val_to_argument(map[key]))
+            for version in versions:
+                other_package_version = get_package_version(os.path.join(dir, version))
+                if call_cmd("dpkg" ["--compare-versions", package_version, "lt", other_package_version]):
+                    logging.info(f"removing deprecated cache file {deb_file} (newer version {other_package_version} found)")
+                    os.remove(deb_path)
+                    break
 
 
 def build_lb_config(config, date):
     """
-    Configures lb config with the specified options
+    Configures lb config with the specified options.
+    We assume that the options in [lb-config] have the same name as the parameters for lb config.
+    Arguments that don't take an extra value can be enabled by setting them to true.
     :param config: merged config
     :return: True if it was successful
     """
@@ -212,7 +165,7 @@ def build_lb_config(config, date):
 
     if not lb_config:
         logging.error("No config options for lb config exists!")
-        return False
+        raise BuildFailure("No config options for lb config exists!")
 
     try:
         if lb_config.get("iso-volume", None) == "auto":
@@ -220,7 +173,7 @@ def build_lb_config(config, date):
     except KeyError as err:
         logging.error("prefix or version-name is not specified")
         logging.error(err)
-        return False
+        raise BuildFailure("Cannot create iso-volume name")
 
     # Add arguments that don't take a value
     single_arguments = {"breakpoints", "clean", "color", "debug", "dump", "force", "no-color", "quiet", "validate",
@@ -246,14 +199,16 @@ def build_lb_config(config, date):
     except KeyError as err:
         logging.error("Mirror options not complete")
         logging.error(err)
-        return False
+        raise BuildFailure("Mirror options not complete")
 
-    return call_lb("config", options)
+    if not call_lb("config", options):
+        raise BuildFailure("lb config failed")
 
 
 def build_lb_build():
     logging.info("Calling lb build...")
-    return call_lb("build")
+    if not call_lb("build"):
+        raise BuildFailure("lb build failed")
 
 
 def build_finish_build(config, today):
@@ -268,7 +223,7 @@ def build_finish_build(config, today):
     except KeyError as err:
         logging.error("Couldn't create prefix for iso. Please specify a prefix and a version-name in config")
         logging.error(err)
-        return False
+        raise BuildFailure("Couldn't create prefix for iso. Please specify a prefix and a version-name in config")
 
     image = f"{prefix}.iso"
     shutil.move(iso_file, image)
@@ -293,6 +248,11 @@ def build_finish_build(config, today):
     # TODO decuple this step from tmpfs
     if "tmpfs" in config and config["tmpfs"].get("build-path", None):
         build_path = config["tmpfs"]["build-path"]
+
+        if not os.path.exists(build_path):
+            logging.info(f"Build directory not found. Creating {build_path}")
+            os.makedirs(build_path)
+
         logging.info(f"Move files to  {build_path}")
         for file in glob(f'{prefix}*'):
             new_file_path = os.path.join(build_path, os.path.basename(file))
@@ -300,38 +260,21 @@ def build_finish_build(config, today):
             shutil.move(file, new_file_path)
 
 
-
-def md5sum_file(filename):
+def check_b43legacy():
     """
-    Generates a md5 hash for a given file.
-    This function reads the file chunk wise.
-    :param filename: path to file for hashing
-    :return: hash object
+    Checks if firmware-b43legacy-installer installed correctly.
+    When installing firmware-b43legacy-installer downloads.openwrt.org is
+    sometimes down. Building doesn't fail in this situation but we would
+    have produced an image without support for some legacy broadcom cards.
     """
-    hash = hashlib.md5()
-    block_size = hash.block_size * 256
-    with open(filename, 'rb') as file:
-        for chunk in iter(lambda: file.read(block_size), b''):
-            hash.update(chunk)
-    return hash
 
-
-def build(config_path):
-    today = datetime.date.today()
-    config = get_config(config_path)
-    start_time = datetime.datetime.now()
-    logging.info(f"Starting build at: {start_time}")
-    build_clean()
-    build_handle_excludes(config)
-    build_bootloader_update(today)
-    build_lb_config(config, today)
-    # init_tmpfs()
-    build_lb_build()
-    build_finish_build()
-    end_time = datetime.datetime.now()
-    logging.info(f"Start: {start_time}")
-    logging.info(f"End: {end_time}")
-    return
+    # This file is created during installation and contains all installed files.
+    installed = os.path.isfile("chroot/lib/firmware/b43legacy/firmware-b43legacy-installer.catalog")
+    if installed:
+        logging.info("firmware-b43legacy-installer seems to be installed correctly")
+    else:
+        logging.error("firmware-b43legacy-installer didn't install correctly!")
+        raise BuildFailure("firmware-b43legacy-installer didn't install correctly!")
 
 
 # TODO test this code
@@ -360,11 +303,11 @@ def init_tmpfs(config):
     except KeyError as err:
         logging.error("tmpfs options couldn't be parsed")
         logging.error(err)
-        return False
+        raise BuildFailure("tmpfs options couldn't be parsed")
 
     if not os.path.ismount(path):
         logging.error(f"No tmpfs is mounted on {path}")
-        return False
+        raise BuildFailure(f"No tmpfs is mounted on {path}")
 
     logging.info(f"Found tmpfs mounted on {path}")
 
@@ -381,7 +324,7 @@ def init_tmpfs(config):
             os.remove(image_path)
         else:
             logging.error(f"unmounting \"{image_mount}\" failed, exiting...")
-            return False
+            raise BuildFailure(f"unmounting \"{image_mount}\" failed, exiting...")
     else:
         logging.info(f"no tmpfs image mounted on \"{image_mount}\" found")
 
@@ -396,22 +339,193 @@ def init_tmpfs(config):
     pwd = os.getcwd()
     shutil.copymode(os.path.join(pwd, "config"), os.path.join(image_mount, "config"))
     os.symlink(os.path.join(pwd, "cache"), os.path.join(image_mount, "cache"))
-    # TODO: this should not be necessary after redesign
     os.symlink(os.path.join(pwd, "templates"), os.path.join(image_mount, "templates"))
 
     return True
 
 
+def get_config(config_path, loaded=set()):
+    """
+    :param config_path: path to the config that should be get
+    :param loaded: config that already have been loaded
+    :return: parsed config
+    """
+    # TODO: Validate config
+    config = None
+    try:
+        with open(config_path, 'r') as f:
+            config = toml.load(f)
+
+        # Recursively merge configs
+        if "based-on" in config.get("config", {}):
+            loaded.add(config_path)
+
+            lower_config_path = config["config"]["based-on"]
+            if lower_config_path in loaded:
+                logging.error("Circular includes are not allowed!")
+                raise EnvironmentError()
+            lower_config = get_config(lower_config_path, loaded)
+            if not lower_config:
+                raise EnvironmentError()
+            config = merge(lower_config, config)
+
+    except EnvironmentError:
+        logging.error(f"Could not successfully read config: {config_path}")
+        return None
+    else:
+        logging.debug(f"Config is {config}")
+        return config
+
+
+# Utility functions
+
+def call_cmd(command, options=None, logging_level=logging.INFO, return_output=False):
+    command = [command]
+    if options:
+        command.extend(options)
+    # TODO log stderr as error
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+
+    output = []
+
+    for line in iter(process.stdout.readline, b''):
+        # TODO: replace this with something more robust
+        output.append(line.decode())
+        logging.log(logging_level, line.decode().replace('\n', ''))
+
+    process.wait()
+    if process.returncode != 0:
+        logging.error(f"Command {command} exited with {process.returncode}")
+
+    return "".join(output) if return_output else process.returncode == 0
+
+
+def call_lb(command, options=None):
+    new_options = [command]
+    if options:
+        new_options.extend(options)
+    return call_cmd("lb", new_options)
+
+
+def md5sum_file(filename):
+    """
+    Generates a md5 hash for a given file.
+    This function reads the file chunk wise.
+    :param filename: path to file for hashing
+    :return: hash object
+    """
+    hash = hashlib.md5()
+    block_size = hash.block_size * 256
+    with open(filename, 'rb') as file:
+        for chunk in iter(lambda: file.read(block_size), b''):
+            hash.update(chunk)
+    return hash
+
+
+def val_to_argument(val):
+    """
+    Maps a given value to a string.
+    True -> "true", False -> "false", x -> str(x)
+    :param val: Value to convert to a string
+    :return: string of value
+    """
+    if val is True:
+        return "true"
+    if val is False:
+        return "false"
+    return str(val)
+
+
+def add_if_true(key, map, list, value, before=None):
+    if map.get(key, False):
+        if before:
+            list.append(before)
+        list.append(value)
+
+
+def add_if_exists(key, map, list, before=None):
+    if key in map:
+        if before:
+            list.append(before)
+        list.append(val_to_argument(map[key]))
+
+
+def get_package_version(package):
+    """
+    Gets package version of given path to a .deb file using dpkg-deb.
+    :param package: path to package
+    :return: Package version
+    """
+    if not os.path.exists(package):
+        logging.error(f"Package {package} does not exits")
+        raise EnvironmentError
+    return call_cmd("dpkg-deb", ["-f", package, "Version"], logging_level=logging.DEBUG, return_output=True)
+
+
+def get_package_name(package):
+    """
+    Gets package name of given path to a .deb file using dpkg-deb
+    :param package: path to package
+    :return: Package Name
+    """
+    if not os.path.exists(package):
+        logging.error(f"Package {package} does not exits")
+        raise EnvironmentError
+    return call_cmd("dpkg-deb", ["-f", package, "Package"], logging_level=logging.DEBUG, return_output=True)
+
+
+def merge(a, b):
+    """
+    Deep merges b into a.
+    If a and b have the same key and the value is not a dict the value of b is used.
+    :param a: Dict to merge into
+    :param b: Dict to merge from
+    :return: a
+    """
+    for key in b:
+        if key in a:
+            if isinstance(a[key], dict) and isinstance(b[key], dict):
+                merge(a[key], b[key])
+            elif a[key] != b[key]:  # If a and be differ overwrite with the value of b
+                a[key] = b[key]
+        else:
+            a[key] = b[key]
+    return a
+
+
+def setup_logging(debug=False):
+    logger = logging.getLogger()
+    logfile_name = "lernstick.log"
+    if debug:
+        logging.basicConfig(level=logging.DEBUG)
+    else:
+        logging.basicConfig(level=logging.INFO)
+    logger.addHandler(logging.StreamHandler(sys.stdout))
+    logger.addHandler(logging.FileHandler(logfile_name))
+    if os.path.exists(logfile_name):
+        os.remove(logfile_name)
+        logging.info("Removed old log file")
+    logging.debug("Logging setup complete.")
+
+
+class BuildFailure(Exception):
+    """
+    This exception is thrown if some in the build chain goes wrong, such that the resulting iso is not usable
+    """
+    pass
+
+
+
+# Main
 def main():
-    ARGS = parser.parse_args()
-    logging.basicConfig(level=logging.INFO)
-    if ARGS.command == "build":
-        build(ARGS.config)
+    args = parser.parse_args()
+    setup_logging()
+    if args.command == "build":
+        build(args.config)
     else:
         parser.print_help()
 
 
-# Press the green button in the gutter to run the script.
 if __name__ == '__main__':
     main()
     exit(0)
